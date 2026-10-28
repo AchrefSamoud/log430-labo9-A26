@@ -164,12 +164,164 @@ Ensuite, répétez le test de charge sur CockroachDB avec les mêmes paramètres
 
 > 💡 **Question 7** : Quelle base de données affiche le plus bas taux d'erreurs et la plus baisse latence? Est-ce que c'est YugabyteDB ou CockroachDB? Illustrez votre réponse avec des captures d'écran ou statistiques de l'interface Locust.
 
-### 6. Préparez l'environnement de production
+### 6. Déployez votre cluster de base de données sur Kubernetes
 
-Choisissez l'une des bases de données présentées dans ce labo et déployez-la sur une VM. Veuillez décrire la procédure dans votre rapport. Créez un fichier CI pour éxécuter le test `concurrency_test.py` avant le déploiement. Si possible, utilisez un GitHub Runner pour automatiser le processus (veuillez consulter le labo 0 pour les instructions).
+Jusqu'ici, votre cluster à trois nœuds tourne en Docker Compose, sur votre machine. Un cluster de base de données distribuée n'a d'intérêt que s'il survit à la perte d'un nœud, ce qui suppose un orchestrateur. Vous allez donc le redéployer sur la grappe du cours avec un **StatefulSet**.
+
+#### Pourquoi un StatefulSet et pas un Deployment
+
+Un `Deployment` crée des pods interchangeables, aux noms imprévisibles. Ça ne convient pas ici : chaque nœud de base de données a **une identité stable** et **son propre disque**. Le `StatefulSet` apporte les deux :
+
+- des noms ordinaux prévisibles — `cockroachdb-0`, `cockroachdb-1`, `cockroachdb-2` ;
+- une entrée DNS stable par pod, fournie par un **Service headless** ;
+- un volume persistant par pod, créé par `volumeClaimTemplates`.
+
+C'est ce qui permet au nœud 0 de retrouver le nœud 1 après un redémarrage.
+
+#### Choisissez votre base de données
+
+Les deux sont acceptées, mais **CockroachDB est nettement plus simple à porter**. Comparez les commandes dans les deux `docker-compose.yml` :
+
+- CockroachDB lance ses trois nœuds avec **la même commande**, seul `--advertise-addr` diffère. Un StatefulSet n'a qu'un seul gabarit de pod : c'est exactement ce qu'il faut.
+- YugabyteDB démarre le nœud 1 autrement que les nœuds 2 et 3, qui font `--join=yugabyte1`. Exprimer cette asymétrie dans un gabarit unique demande un détour.
+
+Prenez CockroachDB, sauf si vous voulez le défi.
+
+#### Ce que vous devez écrire
+
+Trois ressources, dans un fichier `k8s/cockroachdb.yml` à créer :
+
+```yaml
+# 1. Service headless : donne a chaque pod un nom DNS stable
+apiVersion: v1
+kind: Service
+metadata:
+  name: cockroachdb
+spec:
+  clusterIP: None                  # c'est ce "None" qui le rend headless
+  publishNotReadyAddresses: true   # indispensable : les noeuds doivent se
+                                   # joindre AVANT d'etre prets
+  selector:
+    app: cockroachdb
+  ports:
+    - name: sql
+      port: 26257
+    - name: http
+      port: 8080
+
+---
+# 2. StatefulSet : 3 noeuds, chacun avec son volume
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cockroachdb
+spec:
+  serviceName: cockroachdb         # doit pointer sur le Service headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cockroachdb
+  template:
+    metadata:
+      labels:
+        app: cockroachdb
+    spec:
+      containers:
+        - name: cockroachdb
+          image: cockroachdb/cockroach:latest
+          ports:
+            - containerPort: 26257
+            - containerPort: 8080
+          command: ["/bin/bash", "-ecx"]
+          args:
+            # TODO: completez la commande de demarrage.
+            #   --advertise-addr doit valoir le nom complet du pod : $(hostname -f)
+            #   --join doit lister les trois ordinaux :
+            #     cockroachdb-0.cockroachdb, cockroachdb-1.cockroachdb, ...
+            #   pensez aussi a --insecure, --listen-addr et --http-addr
+            - "exec /cockroach/cockroach start TODO"
+          volumeMounts:
+            - name: datadir
+              mountPath: /cockroach/cockroach-data
+  volumeClaimTemplates:
+    - metadata:
+        name: datadir
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+        # pas de storageClassName : la classe par defaut de la grappe s'applique
+
+---
+# 3. Service normal : le point d'entree de votre application
+# TODO: exposez le port 26257 vers les pods portant le label app=cockroachdb
+```
+
+Adaptez ensuite la chaîne de connexion de l'application pour qu'elle pointe sur ce dernier Service au lieu de `cockroach1`.
+
+#### Initialisez le cluster
+
+Le `docker-compose.yml` possède un service `cluster-init` qui exécute `cockroach init`. **Vous ne pouvez pas le reproduire avec un Job** : le groupe d'API `batch` vous est refusé sur la grappe du cours. Faites-le à la main, une seule fois, quand les trois pods sont démarrés :
+
+```bash
+kubectl exec -it cockroachdb-0 -- /cockroach/cockroach init --insecure
+```
+
+#### Vérifiez
+
+```bash
+kubectl get statefulset
+kubectl get pods -l app=cockroachdb
+kubectl get pvc                       # trois volumes, un par pod
+kubectl exec -it cockroachdb-0 -- /cockroach/cockroach node status --insecure
+```
+
+Les trois nœuds doivent apparaître, avec leur identifiant et leur adresse.
+
+> ⚠️ **Libérez la place quand vous avez terminé.** La grappe est partagée par les 25 équipes sur un seul serveur, et votre StatefulSet y ajoute trois pods et trois volumes. Dès vos captures prises :
+>
+> ```bash
+> kubectl delete statefulset cockroachdb
+> kubectl delete pvc -l app=cockroachdb
+> ```
+>
+> Les volumes ne sont pas supprimés avec le StatefulSet : la deuxième commande n'est pas optionnelle.
+
+> 📝 **Si vos pods restent en `Pending` avec `Too many pods`**, la grappe est saturée et ce n'est pas votre faute. Validez votre manifeste sur un cluster local — `kind`, `k3d` ou le Kubernetes de Docker Desktop — et joignez la capture de l'erreur à votre rapport. Un déploiement validé localement reste recevable.
+
+> 💡 **Question 8** : Pourquoi un `Service` headless est-il nécessaire ici, alors qu'un Service ordinaire suffisait au Labo 05 ? Que contient l'entrée DNS d'un pod du StatefulSet, et que se passerait-il si vous utilisiez un `Deployment` à la place ? Illustrez avec la sortie de `kubectl get pods` et d'un `nslookup` depuis un pod.
+
+### 7. Automatisez avec un pipeline CI/CD
+
+Créez un workflow GitHub Actions qui, à chaque push :
+
+1. exécute `concurrency_test.py` — aucun déploiement ne doit partir si le test de concurrence échoue ;
+2. construit l'image de votre application et la publie sur GHCR, comme au Labo 00.
+
+Pour le déploiement lui-même, souvenez-vous que les runners de GitHub sont hébergés hors du réseau de l'ÉTS et ne peuvent pas joindre la grappe. Deux voies :
+
+- automatiser jusqu'à la publication de l'image, et déclencher le déploiement depuis votre machine connectée au VPN avec un script versionné ;
+- enregistrer un **runner auto-hébergé** sur une machine connectée au VPN, qui exécutera le `kubectl` depuis le workflow.
+
+La seconde ferme la boucle, mais elle ne fonctionne que lorsque la machine est allumée. Documentez votre choix dans le rapport.
 
 
 ## 📦 Livrables
 
-- Un fichier `.zip` contenant l'intégralité du code source du projet Labo 09 (incluant les fichiers CI et le test).
-- Un rapport en `.pdf` répondant aux questions présentées dans ce document. Il est obligatoire d'illustrer vos réponses avec du code ou des captures d'écran/terminal.
+> ⚠️ **La remise se fait au niveau de la PHASE, pas du labo.** Les Labos 06, 07, 08 et 09 forment la **Phase 3**, remise en une seule fois dans un espace Moodle unique, à la fin de la phase.
+
+Vous déposerez **exactement deux fichiers** dans Moodle, pour toute la Phase 3 :
+
+| # | Fichier | Contenu |
+|---|---|---|
+| 1 | `LOG430-A26-Phase3-EquipeNN.zip` | Le code source des **4 labos**, un dossier par labo (`labo06/`, `labo07/`, `labo08/`, `labo09/`) |
+| 2 | `LOG430-A26-Phase3-EquipeNN.pdf` | Un **rapport unique** en 4 sections, une par labo |
+
+> ⚠️ Le rapport PDF doit être déposé **comme fichier séparé**, et non à l'intérieur du zip.
+
+Ce que **ce labo** doit contenir dans la remise :
+
+- Son code source complet, dans le dossier `labo09/` du zip.
+- La section correspondante du rapport, répondant aux **8 questions** de ce fichier. Il est **obligatoire** d'illustrer chaque réponse avec du code ou une sortie de terminal.
+
