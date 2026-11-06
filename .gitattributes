@@ -1,0 +1,4 @@
+# Les scripts montes dans des conteneurs Linux doivent rester en LF,
+# sinon bash echoue sur les retours chariot sous Windows.
+*.sh  text eol=lf
+*.sql text eol=lf

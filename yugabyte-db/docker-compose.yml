@@ -9,8 +9,6 @@ services:
       - "9000:9000"   # yb-tserver UI
       - "5433:5433"   # YSQL
       - "9042:9042"   # YCQL
-    volumes:
-      - yugabyte_data1:/home/yugabyte/var
     networks:
       - labo09-network
     healthcheck:
@@ -25,8 +23,6 @@ services:
     container_name: yugabyte2
     command: >
       bash -c "/home/yugabyte/bin/yugabyted start --advertise_address=yugabyte2 --join=yugabyte1 --daemon=false --base_dir=/home/yugabyte/var"
-    volumes:
-      - yugabyte_data2:/home/yugabyte/var
     depends_on:
       yugabyte1:
         condition: service_healthy
@@ -38,8 +34,6 @@ services:
     container_name: yugabyte3
     command: >
       bash -c "/home/yugabyte/bin/yugabyted start --advertise_address=yugabyte3 --join=yugabyte1 --daemon=false --base_dir=/home/yugabyte/var"
-    volumes:
-      - yugabyte_data3:/home/yugabyte/var
     depends_on:
       yugabyte1:
         condition: service_healthy
@@ -95,7 +89,3 @@ networks:
   labo09-network:
     driver: bridge
 
-volumes:
-  yugabyte_data1:
-  yugabyte_data2:
-  yugabyte_data3:
